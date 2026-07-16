@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Passing Challenge</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="game-shell">
+    <section class="scoreboard" aria-label="Game status">
+      <div>
+        <p class="eyebrow">Passing Challenge</p>
+        <h1 id="roundTitle">Set up the pass</h1>
+      </div>
+      <div class="success-card" aria-label="Player success rate">
+        <span id="playerNameDisplay" class="success-player">Player</span>
+        <strong id="successRate">0/0</strong>
+        <span id="successPercent">0%</span>
+      </div>
+      <div class="timer-card" aria-label="Run timer">
+        <span>Run time</span>
+        <strong id="runTimer">5:00</strong>
+      </div>
+      <button id="newRoundButton" type="button">New round</button>
+    </section>
+
+    <section id="playerSetup" class="player-setup" aria-label="Player setup">
+      <form id="playerForm" class="player-form">
+        <label for="playerNameInput">Player name</label>
+        <div class="player-form-row">
+          <input id="playerNameInput" name="playerName" type="text" maxlength="18" autocomplete="nickname" placeholder="Enter your name" required>
+          <button type="submit">Start</button>
+        </div>
+      </form>
+    </section>
+
+    <canvas id="gameCanvas" width="2520" height="1512" aria-label="2D soccer passing game"></canvas>
+
+    <section id="leaderboardPanel" class="leaderboard-panel" aria-label="Run leaderboard" hidden>
+      <div class="leaderboard-header">
+        <div>
+          <p class="eyebrow">5-minute run complete</p>
+          <h2>Leaderboard</h2>
+        </div>
+        <button id="restartRunButton" type="button">New run</button>
+      </div>
+      <div id="runSummary" class="run-summary"></div>
+      <ol id="leaderboardList" class="leaderboard-list"></ol>
+    </section>
+
+    <section id="readyPanel" class="ready-panel" aria-label="Round lineup">
+      <div>
+        <p class="eyebrow">Next round</p>
+        <h2 id="readyTitle">Lineup</h2>
+      </div>
+      <div id="readyLineup" class="ready-lineup"></div>
+      <div id="countdownDisplay" class="countdown-display" aria-live="polite">3</div>
+    </section>
+
+    <section class="instructions" aria-label="Controls">
+      <span>Carry forward, then drag anywhere on the pitch to pass or shoot before the line closes.</span>
+      <span id="playerLineup">Passer - Scorer - Goalie</span>
+    </section>
+  </main>
+
+  <script src="game.js"></script>
+</body>
+</html>
