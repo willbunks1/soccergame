@@ -3,6 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#07100b">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Passing Challenge">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Passing Challenge</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -25,7 +30,8 @@
       <button id="newRoundButton" type="button">New round</button>
     </section>
 
-    <button id="fullscreenButton" class="fullscreen-button" type="button" aria-pressed="false">Fullscreen pitch</button>
+    <button id="fullscreenButton" class="fullscreen-button" type="button" aria-pressed="false" hidden>Fullscreen pitch</button>
+    <button id="pitchHotspot" class="pitch-hotspot" type="button" aria-label="Show pitch controls"></button>
 
     <section id="playerSetup" class="player-setup" aria-label="Player setup">
       <form id="playerForm" class="player-form">

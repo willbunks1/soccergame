@@ -6,6 +6,8 @@
   --accent: #f4c542;
   --button: #f4c542;
   --button-hover: #ffd766;
+  --pitch-vw: 100vw;
+  --pitch-vh: 100dvh;
 }
 
 * {
@@ -22,6 +24,7 @@ body {
   display: grid;
   place-items: center;
   padding: 24px;
+  overflow-x: hidden;
   background:
     radial-gradient(circle at 24% 8%, rgba(244, 197, 66, 0.22), transparent 22%),
     radial-gradient(circle at 86% 16%, rgba(80, 175, 255, 0.14), transparent 26%),
@@ -298,9 +301,16 @@ button:disabled {
     0 0 22px rgba(244, 197, 66, 0.24);
 }
 
+.pitch-hotspot {
+  display: none;
+}
+
 canvas {
   display: block;
-  width: 100%;
+  width: min(100%, calc((100vh - 230px) * 5 / 3));
+  max-height: calc(100vh - 230px);
+  min-height: min(340px, calc(100vh - 230px));
+  margin: 0 auto;
   aspect-ratio: 5 / 3;
   border: 2px solid rgba(255, 255, 255, 0.62);
   border-radius: 8px;
@@ -445,6 +455,12 @@ canvas {
     margin-bottom: 12px;
   }
 
+  canvas {
+    width: 100%;
+    max-height: none;
+    min-height: 208px;
+  }
+
   button {
     width: 100%;
   }
@@ -457,24 +473,53 @@ canvas {
   }
 }
 
+html.pitch-fullscreen-root {
+  width: 100%;
+  height: var(--pitch-vh);
+  min-height: var(--pitch-vh);
+  overflow: hidden;
+  background: #07100b;
+  overscroll-behavior: none;
+}
+
 body.pitch-fullscreen {
   position: fixed;
   inset: 0;
-  width: 100vw;
-  height: 100dvh;
-  min-height: 100dvh;
+  width: var(--pitch-vw);
+  height: var(--pitch-vh);
+  min-height: var(--pitch-vh);
   overflow: hidden;
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  padding: 0;
   place-items: stretch;
   background: #07100b;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 body.pitch-fullscreen .game-shell {
-  width: 100vw;
-  height: 100dvh;
+  width: var(--pitch-vw);
+  height: var(--pitch-vh);
   max-width: none;
   display: grid;
   place-items: center;
+}
+
+body.pitch-fullscreen .pitch-hotspot {
+  display: block;
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 99;
+  width: max(86px, calc(env(safe-area-inset-right) + 76px));
+  height: max(72px, calc(env(safe-area-inset-top) + 62px));
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 body.pitch-fullscreen .game-shell::before,
@@ -487,10 +532,11 @@ body.pitch-fullscreen .instructions {
 }
 
 body.pitch-fullscreen canvas {
-  width: 100vw;
-  height: 100dvh;
+  width: var(--pitch-vw);
+  height: var(--pitch-vh);
   max-width: none;
   max-height: none;
+  min-height: 0;
   aspect-ratio: auto;
   border: 0;
   border-radius: 0;
@@ -500,18 +546,32 @@ body.pitch-fullscreen canvas {
 body.pitch-fullscreen .fullscreen-button {
   display: block;
   position: fixed;
-  top: max(10px, env(safe-area-inset-top));
-  right: max(10px, env(safe-area-inset-right));
+  top: max(8px, env(safe-area-inset-top));
+  right: max(8px, env(safe-area-inset-right));
   z-index: 100;
   width: auto;
-  min-height: 38px;
+  min-height: 34px;
   margin: 0;
-  padding: 0 12px;
+  padding: 0 10px;
   background: rgba(7, 16, 11, 0.72);
   color: #f4c542;
   border: 1px solid rgba(244, 197, 66, 0.48);
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32);
   backdrop-filter: blur(10px);
+  opacity: 1;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+body.pitch-fullscreen.ios-browser-fullscreen .fullscreen-button {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 0.78rem;
+}
+
+body.pitch-fullscreen.pitch-controls-hidden .fullscreen-button {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-8px);
 }
 
 @media (orientation: portrait) {
