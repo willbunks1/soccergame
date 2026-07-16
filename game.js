@@ -14,6 +14,7 @@ const leaderboardPanel = document.getElementById("leaderboardPanel");
 const leaderboardList = document.getElementById("leaderboardList");
 const runSummary = document.getElementById("runSummary");
 const restartRunButton = document.getElementById("restartRunButton");
+const fullscreenButton = document.getElementById("fullscreenButton");
 const readyPanel = document.getElementById("readyPanel");
 const readyTitle = document.getElementById("readyTitle");
 const readyLineup = document.getElementById("readyLineup");
@@ -4536,12 +4537,89 @@ function gameLoop() {
   animationFrameId = requestAnimationFrame(gameLoop);
 }
 
+function getFullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+function setPitchFullscreenMode(enabled) {
+  document.body.classList.toggle("pitch-fullscreen", enabled);
+  fullscreenButton.setAttribute("aria-pressed", enabled ? "true" : "false");
+  fullscreenButton.textContent = enabled ? "Exit pitch" : "Fullscreen pitch";
+}
+
+async function lockLandscapeMode() {
+  try {
+    if (screen.orientation?.lock) {
+      await screen.orientation.lock("landscape");
+    }
+  } catch (error) {
+    // Some mobile browsers only allow manual rotation; the pitch-only view still works.
+  }
+}
+
+function unlockOrientationMode() {
+  try {
+    screen.orientation?.unlock?.();
+  } catch (error) {
+    // Orientation unlock is not supported everywhere.
+  }
+}
+
+async function enterPitchFullscreen() {
+  setPitchFullscreenMode(true);
+
+  try {
+    if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+    } else if (document.documentElement.webkitRequestFullscreen) {
+      document.documentElement.webkitRequestFullscreen();
+    }
+  } catch (error) {
+    // Keep the pitch-only layout even if the browser blocks fullscreen.
+  }
+
+  await lockLandscapeMode();
+}
+
+async function exitPitchFullscreen() {
+  setPitchFullscreenMode(false);
+  unlockOrientationMode();
+
+  try {
+    if (getFullscreenElement() && document.exitFullscreen) {
+      await document.exitFullscreen();
+    } else if (getFullscreenElement() && document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+    }
+  } catch (error) {
+    // Browser exit can fail if fullscreen was not granted.
+  }
+}
+
+function togglePitchFullscreen() {
+  if (document.body.classList.contains("pitch-fullscreen")) {
+    exitPitchFullscreen();
+  } else {
+    enterPitchFullscreen();
+  }
+}
+
+function syncPitchFullscreenState() {
+  if (!getFullscreenElement() && document.body.classList.contains("pitch-fullscreen")) {
+    setPitchFullscreenMode(false);
+    unlockOrientationMode();
+  }
+}
+
 canvas.addEventListener("mousedown", handleInputStart);
 canvas.addEventListener("mousemove", handleInputMove);
 window.addEventListener("mouseup", handleInputEnd);
 canvas.addEventListener("touchstart", handleInputStart, { passive: false });
 canvas.addEventListener("touchmove", handleInputMove, { passive: false });
 window.addEventListener("touchend", handleInputEnd, { passive: false });
+fullscreenButton.addEventListener("click", togglePitchFullscreen);
+document.addEventListener("fullscreenchange", syncPitchFullscreenState);
+document.addEventListener("webkitfullscreenchange", syncPitchFullscreenState);
 readyPanel.addEventListener("click", skipCountdown);
 readyPanel.addEventListener("touchstart", skipCountdown, { passive: false });
 newRoundButton.addEventListener("click", () => {
