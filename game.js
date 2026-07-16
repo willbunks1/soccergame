@@ -236,6 +236,7 @@ let gameStarted = false;
 let state = "setup";
 let outcomeTimer = 0;
 let animationFrameId = null;
+let lastFullscreenButtonPress = 0;
 
 function randomBetween(min, max) {
   return min + Math.random() * (max - min);
@@ -4604,8 +4605,22 @@ function togglePitchFullscreen() {
   }
 }
 
+function handleFullscreenButtonPress(event) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  const now = performance.now();
+
+  if (now - lastFullscreenButtonPress < 350) {
+    return;
+  }
+
+  lastFullscreenButtonPress = now;
+  togglePitchFullscreen();
+}
+
 function syncPitchFullscreenState() {
-  if (!getFullscreenElement() && document.body.classList.contains("pitch-fullscreen")) {
+  if (!getFullscreenElement() && document.body.classList.contains("pitch-fullscreen") && performance.now() - lastFullscreenButtonPress > 500) {
     setPitchFullscreenMode(false);
     unlockOrientationMode();
   }
@@ -4617,7 +4632,9 @@ window.addEventListener("mouseup", handleInputEnd);
 canvas.addEventListener("touchstart", handleInputStart, { passive: false });
 canvas.addEventListener("touchmove", handleInputMove, { passive: false });
 window.addEventListener("touchend", handleInputEnd, { passive: false });
-fullscreenButton.addEventListener("click", togglePitchFullscreen);
+fullscreenButton.addEventListener("pointerup", handleFullscreenButtonPress);
+fullscreenButton.addEventListener("touchend", handleFullscreenButtonPress, { passive: false });
+fullscreenButton.addEventListener("click", handleFullscreenButtonPress);
 document.addEventListener("fullscreenchange", syncPitchFullscreenState);
 document.addEventListener("webkitfullscreenchange", syncPitchFullscreenState);
 readyPanel.addEventListener("click", skipCountdown);
