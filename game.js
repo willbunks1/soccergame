@@ -62,8 +62,12 @@ const SETTINGS = {
   dribbleMoveDistance: FIELD.height * 0.2,
   kickPower: 0.045,
   friction: 0.994,
+  passPowerScale: 0.88,
+  passFriction: 0.986,
+  shotFriction: 0.992,
+  looseBallFriction: 0.982,
   minBallSpeed: 0.1,
-  playerMoveSpeed: FIELD.height * 0.00105,
+  playerMoveSpeed: FIELD.height * 0.001155,
   ballCarrierSpeedScale: 0.8,
   aimingMoveSpeedScale: 0.2,
   aimingSpeedBlend: 0.28,
@@ -114,6 +118,8 @@ const SETTINGS = {
   throughPassLeadDistance: FIELD.height * 0.055,
   blockDistance: 22,
   defenderBlockDistance: 25,
+  defenderPassBlockDistance: 14,
+  defenderShotBlockDistance: 18,
   defenderInterceptionSearchFrames: 168,
   defenderInterceptionFrameStep: 5,
   defenderInterceptionReachWindow: 24,
@@ -259,6 +265,18 @@ function clamp(value, min, max) {
 
 function lerp(start, end, amount) {
   return start + (end - start) * amount;
+}
+
+function getBallFriction(intentState = state, speed = Math.hypot(ball?.vx || 0, ball?.vy || 0)) {
+  if (intentState === "pass") {
+    return speed <= SETTINGS.looseBallSpeed * 1.25 ? SETTINGS.looseBallFriction : SETTINGS.passFriction;
+  }
+
+  if (intentState === "shot") {
+    return SETTINGS.shotFriction;
+  }
+
+  return SETTINGS.friction;
 }
 
 function angleDifference(a, b) {
@@ -822,11 +840,15 @@ function distanceToSegment(point, start, end) {
 }
 
 function getSegmentProjectionAmount(point, start, end) {
+  return clamp(getRawSegmentProjectionAmount(point, start, end), 0, 1);
+}
+
+function getRawSegmentProjectionAmount(point, start, end) {
   const dx = end.x - start.x;
   const dy = end.y - start.y;
   const lengthSquared = dx * dx + dy * dy;
 
-  return lengthSquared === 0 ? 0 : clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0, 1);
+  return lengthSquared === 0 ? 0 : ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared;
 }
 
 function getAimedReceiver(vx, vy) {
@@ -1292,7 +1314,7 @@ function handleInputEnd(event) {
     : getAbilityFactor(passer.name, "PAS", 0.005);
   const error = directShot ? 1 / getAbilityFactor(passer.name, "SHO", 0.012) : 1 / passAccuracy;
   const angle = Math.atan2(dy, dx) + randomBetween(-0.075, 0.075) * error;
-  const power = Math.hypot(dx, dy) * SETTINGS.kickPower * kickFactor;
+  const power = Math.hypot(dx, dy) * SETTINGS.kickPower * kickFactor * (directShot ? 1 : SETTINGS.passPowerScale);
 
   ball.vx = Math.cos(angle) * power;
   ball.vy = Math.sin(angle) * power;
@@ -1796,7 +1818,7 @@ function getAttackerPassTarget(attacker) {
 }
 
 function predictBallPosition(frames) {
-  const friction = SETTINGS.friction;
+  const friction = getBallFriction();
   const scaledFrames = frames * SETTINGS.gameSpeed;
   const travel = friction === 1 ? scaledFrames : (1 - Math.pow(friction, scaledFrames)) / (1 - friction);
 
@@ -2411,8 +2433,9 @@ function updateBall() {
   ball.prevY = ball.y;
   ball.x += ball.vx * SETTINGS.gameSpeed;
   ball.y += ball.vy * SETTINGS.gameSpeed;
-  ball.vx *= SETTINGS.friction;
-  ball.vy *= SETTINGS.friction;
+  const friction = getBallFriction();
+  ball.vx *= friction;
+  ball.vy *= friction;
   updateBallHeight();
 
   if (Math.hypot(ball.vx, ball.vy) < SETTINGS.minBallSpeed && ball.z === 0) {
@@ -2945,7 +2968,7 @@ function setOutcome(message) {
     state = "saved";
   } else if (message === "Offside!") {
     state = "offside";
-  } else if (message === "Blocked!") {
+  } else if (message.startsWith("Blocked")) {
     state = "blocked";
   } else if (message === "Tackled!") {
     state = "tackled";
@@ -3078,8 +3101,10 @@ function checkCollisions() {
       return;
     }
 
-    if (defenders.some((defender) => distance(defender, ball) <= claimDistance)) {
-      setOutcome("Blocked!");
+    const looseBallDefender = defenders.find((defender) => distance(defender, ball) <= claimDistance);
+
+    if (looseBallDefender) {
+      setOutcome(`Blocked by ${looseBallDefender.name}!`);
       return;
     }
 
@@ -3143,10 +3168,11 @@ function checkCollisions() {
     return;
   }
 
-  if ((state === "pass" || state === "shot") && defenders.some(defenderCanBlockBall)) {
+  const blockingDefender = ["pass", "shot"].includes(state) ? getBlockingDefender() : null;
+  if (blockingDefender) {
     ball.vx *= -0.25;
     ball.vy *= 0.35;
-    setOutcome("Blocked!");
+    setOutcome(`Blocked by ${blockingDefender.name}!`);
     return;
   }
 
@@ -3179,15 +3205,31 @@ function catchBallByGoalie() {
   ball.owner = null;
 }
 
+function getBlockingDefender() {
+  return defenders.find(defenderCanBlockBall) || null;
+}
+
 function defenderCanBlockBall(defender) {
   const previousBall = {
     x: ball.prevX ?? ball.x,
     y: ball.prevY ?? ball.y
   };
-  const pathAmount = getSegmentProjectionAmount(defender, previousBall, ball);
-  const blockReach = SETTINGS.defenderBlockDistance * getAbilityFactor(defender.name, "DEF", 0.006);
+  const frameDistance = distance(previousBall, ball);
 
-  return pathAmount > 0.04 && distanceToSegment(defender, previousBall, ball) <= blockReach;
+  if (frameDistance < SETTINGS.ballRadius * 0.35 || (ball.z || 0) > SETTINGS.playerRadius * 0.75) {
+    return false;
+  }
+
+  const rawPathAmount = getRawSegmentProjectionAmount(defender, previousBall, ball);
+  const pathAmount = clamp(rawPathAmount, 0, 1);
+  const baseReach = state === "shot" ? SETTINGS.defenderShotBlockDistance : SETTINGS.defenderPassBlockDistance;
+  const speed = Math.hypot(ball.vx, ball.vy);
+  const speedReach = clamp(speed / SETTINGS.shotSpeed, 0, 1) * 3.5;
+  const blockReach = (baseReach + speedReach) * getAbilityFactor(defender.name, "DEF", 0.004);
+  const onVisiblePath = rawPathAmount >= 0.08 && rawPathAmount <= 1.08;
+  const goalSideForShot = state !== "shot" || defender.x >= Math.min(previousBall.x, ball.x) - SETTINGS.playerRadius * 0.4;
+
+  return onVisiblePath && goalSideForShot && distanceToSegment(defender, previousBall, ball) <= blockReach;
 }
 
 function getCleanPassQuality(receiver = getActiveReceiver(), runScore = lastPassRunScore) {
@@ -5101,7 +5143,8 @@ function getAimPreview(dx, dy) {
     ? getAbilityFactor(passer.name, "SHO", 0.007)
     : getAbilityFactor(passer.name, "PAS", 0.005);
   const angle = Math.atan2(dy, dx);
-  const speed = Math.hypot(dx, dy) * SETTINGS.kickPower * kickFactor;
+  const speed = Math.hypot(dx, dy) * SETTINGS.kickPower * kickFactor * (directShot ? 1 : SETTINGS.passPowerScale);
+  const friction = getBallFriction(intent, speed);
   const points = [];
   let previewX = ball.x;
   let previewY = ball.y;
@@ -5111,8 +5154,8 @@ function getAimPreview(dx, dy) {
   for (let frame = 0; frame <= 96; frame += 1) {
     previewX += previewVx * SETTINGS.gameSpeed;
     previewY += previewVy * SETTINGS.gameSpeed;
-    previewVx *= SETTINGS.friction;
-    previewVy *= SETTINGS.friction;
+    previewVx *= friction;
+    previewVy *= friction;
 
     if (frame % 5 === 0) {
       points.push({ x: previewX, y: previewY });
