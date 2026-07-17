@@ -62,12 +62,9 @@ const SETTINGS = {
   dribbleMoveDistance: FIELD.height * 0.2,
   kickPower: 0.045,
   friction: 0.994,
-  passPowerScale: 0.88,
-  passFriction: 0.986,
-  shotFriction: 0.992,
-  looseBallFriction: 0.982,
   minBallSpeed: 0.1,
-  playerMoveSpeed: FIELD.height * 0.001155,
+  playerMoveSpeed: FIELD.height * 0.00105,
+  postPassPlayerSpeedScale: 1.2,
   ballCarrierSpeedScale: 0.8,
   aimingMoveSpeedScale: 0.2,
   aimingSpeedBlend: 0.28,
@@ -108,8 +105,13 @@ const SETTINGS = {
   cameraShakeFrames: 28,
   speedLineFrames: 48,
   goalParticleCount: 72,
-  goalieDiveFrames: 38,
+  goalieDiveFrames: 30,
   goalieCatchDistance: FIELD.height * 0.034,
+  goalieDiveHandOffset: FIELD.height * 0.047,
+  goalieDiveGloveReach: FIELD.height * 0.021,
+  goalieBodySaveReach: FIELD.height * 0.017,
+  goalieParrySpeed: 8.2,
+  goalieSaveEffectFrames: 24,
   offsideLevelTolerance: FIELD.height * 0.006,
   passerPressDistance: FIELD.height * 0.26,
   passerBlockDistance: FIELD.height * 0.018,
@@ -127,6 +129,15 @@ const SETTINGS = {
   defenderShotBlockDepth: 0.34,
   tackleDistance: 26,
   scorerTackleDistance: 24,
+  evaSpeedScale: 1.25,
+  evaSlideFrames: 20,
+  evaSlideCooldownFrames: 145,
+  evaSlideSpeed: FIELD.height * 0.0064,
+  evaSlideTriggerDistance: FIELD.height * 0.13,
+  evaSlideReach: FIELD.height * 0.038,
+  evaInjuryKnockbackFrames: 34,
+  evaInjuryKnockbackSpeed: FIELD.height * 0.008,
+  evaInjuryBannerDelayFrames: 34,
   looseBallSpeed: 0.9,
   looseBallClaimDistance: FIELD.height * 0.034,
   goalieClaimPassSpeed: 5.7,
@@ -174,6 +185,17 @@ const KITS = {
     cuff: "#f2c230",
     accentBlack: "#080808",
     accentRed: "#d91f2c",
+    accentGold: "#f2c230"
+  },
+  eva: {
+    shirtTop: "#090b10",
+    shirtBottom: "#161b24",
+    shorts: "#050607",
+    socks: "#ff4054",
+    number: "#ff4054",
+    cuff: "#ff4054",
+    accentBlack: "#000000",
+    accentRed: "#ff4054",
     accentGold: "#f2c230"
   },
   keeper: {
@@ -229,6 +251,15 @@ let netBendX = 0;
 let goalFlashTimer = 0;
 let cameraShakeTimer = 0;
 let speedLineTimer = 0;
+let evaInjuryPlayer = null;
+let evaInjuryTimer = 0;
+let evaInjuryVx = 0;
+let evaInjuryVy = 0;
+let goalieSaveEffectTimer = 0;
+let goalieSaveEffectX = 0;
+let goalieSaveEffectY = 0;
+let goalieSaveEffectAction = "";
+let outcomeBannerDelayTimer = 0;
 let goalParticles = [];
 let dragStart = null;
 let dragPoint = null;
@@ -267,16 +298,24 @@ function lerp(start, end, amount) {
   return start + (end - start) * amount;
 }
 
-function getBallFriction(intentState = state, speed = Math.hypot(ball?.vx || 0, ball?.vy || 0)) {
-  if (intentState === "pass") {
-    return speed <= SETTINGS.looseBallSpeed * 1.25 ? SETTINGS.looseBallFriction : SETTINGS.passFriction;
-  }
+function smoothstep(edge0, edge1, value) {
+  const amount = clamp((value - edge0) / (edge1 - edge0), 0, 1);
 
-  if (intentState === "shot") {
-    return SETTINGS.shotFriction;
-  }
+  return amount * amount * (3 - amount * 2);
+}
 
-  return SETTINGS.friction;
+function easeOutCubic(value) {
+  return 1 - Math.pow(1 - clamp(value, 0, 1), 3);
+}
+
+function isPostKickSpectatorPhase() {
+  return ["pass", "receive", "shot"].includes(state);
+}
+
+function getActivePlayerBaseSpeed() {
+  const spectatorScale = isPostKickSpectatorPhase() ? SETTINGS.postPassPlayerSpeedScale : 1;
+
+  return SETTINGS.playerMoveSpeed * SETTINGS.gameSpeed * spectatorScale;
 }
 
 function angleDifference(a, b) {
@@ -839,6 +878,18 @@ function distanceToSegment(point, start, end) {
   });
 }
 
+function closestPointOnSegment(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const amount = getSegmentProjectionAmount(point, start, end);
+
+  return {
+    x: start.x + dx * amount,
+    y: start.y + dy * amount,
+    amount
+  };
+}
+
 function getSegmentProjectionAmount(point, start, end) {
   return clamp(getRawSegmentProjectionAmount(point, start, end), 0, 1);
 }
@@ -1012,6 +1063,12 @@ function startRound() {
     diveY: FIELD.goalTop + FIELD.goalHeight / 2,
     diveDuration: SETTINGS.goalieDiveFrames,
     diveTimer: 0,
+    diveProgress: 0,
+    diveStretch: 0,
+    diveLanding: 0,
+    saveAction: "",
+    saveContactX: FIELD.goalX - 54,
+    saveContactY: FIELD.goalTop + FIELD.goalHeight / 2,
     diving: false,
     claimTargetX: FIELD.goalX - 54,
     claimTargetY: FIELD.goalTop + FIELD.goalHeight / 2,
@@ -1073,6 +1130,27 @@ function startRound() {
       markOffsetY: FIELD.height * 0.045,
       moveAngle: null,
       accelTimer: 0
+    },
+    {
+      role: "Defender",
+      name: "EVA",
+      number: 99,
+      x: defenderLineX + FIELD.height * 0.07,
+      homeX: defenderLineX + FIELD.height * 0.07,
+      y: middleDefenderY,
+      homeY: middleDefenderY,
+      color: KITS.eva.shirtTop,
+      phase: Math.random() * Math.PI * 2,
+      waitFrames: Math.round(randomBetween(55, 105)),
+      willTackleScorer: true,
+      markOffsetY: 0,
+      moveAngle: null,
+      accelTimer: 0,
+      isEva: true,
+      speedScale: SETTINGS.evaSpeedScale,
+      slideTimer: 0,
+      slideCooldown: 0,
+      slideAngle: 0
     }
   ];
 
@@ -1117,6 +1195,12 @@ function startRound() {
   goalFlashTimer = 0;
   cameraShakeTimer = 0;
   speedLineTimer = 0;
+  goalieSaveEffectTimer = 0;
+  goalieSaveEffectX = 0;
+  goalieSaveEffectY = 0;
+  goalieSaveEffectAction = "";
+  outcomeBannerDelayTimer = 0;
+  clearEvaInjuryEffect();
   goalParticles = [];
   dragStart = null;
   dragPoint = null;
@@ -1128,7 +1212,7 @@ function startRound() {
   countdownFrames = 0;
   outcomeTimer = 0;
   roundTitle.textContent = "Choose pass or shot";
-  playerLineup.textContent = `${passer.name}, ${scorer.name}, and ${supporter.name} attack against three defenders.`;
+  playerLineup.textContent = `${passer.name}, ${scorer.name}, and ${supporter.name} attack against three defenders and EVA.`;
   readyTitle.textContent = "Lineup";
   countdownDisplay.textContent = "";
   readyLineup.innerHTML = [
@@ -1136,7 +1220,7 @@ function startRound() {
     [scorer.role, scorer.name],
     [supporter.role, supporter.name],
     [goalie.role, goalie.name],
-    ...defenders.map((defender) => ["Defender", defender.name])
+    ...defenders.map((defender) => [defender.isEva ? "End Boss" : "Defender", defender.name])
   ].map(([role, name]) => `
     <div class="lineup-item">
       <span class="lineup-role">${role}</span>
@@ -1314,7 +1398,7 @@ function handleInputEnd(event) {
     : getAbilityFactor(passer.name, "PAS", 0.005);
   const error = directShot ? 1 / getAbilityFactor(passer.name, "SHO", 0.012) : 1 / passAccuracy;
   const angle = Math.atan2(dy, dx) + randomBetween(-0.075, 0.075) * error;
-  const power = Math.hypot(dx, dy) * SETTINGS.kickPower * kickFactor * (directShot ? 1 : SETTINGS.passPowerScale);
+  const power = Math.hypot(dx, dy) * SETTINGS.kickPower * kickFactor;
 
   ball.vx = Math.cos(angle) * power;
   ball.vy = Math.sin(angle) * power;
@@ -1452,8 +1536,9 @@ function getStaminaSpeedScale(player) {
 
 function getMovementSpeedScale(player) {
   const carrierScale = isBallCarrier(player) ? SETTINGS.ballCarrierSpeedScale : 1;
+  const playerScale = player?.speedScale ?? 1;
 
-  return carrierScale * getStaminaSpeedScale(player);
+  return carrierScale * playerScale * getStaminaSpeedScale(player);
 }
 
 function getPlayerStamina(player) {
@@ -1530,7 +1615,7 @@ function movePlayerToward(player, target, speedScale = 1) {
   if (length > 1) {
     const angle = Math.atan2(dy, dx);
     const movementScale = getMovementSpeedScale(player);
-    const maxSpeed = SETTINGS.playerMoveSpeed * SETTINGS.gameSpeed * speedScale * movementScale;
+    const maxSpeed = getActivePlayerBaseSpeed() * speedScale * movementScale;
 
     if (player !== passer) {
       moveNonPasserWithInertia(player, dx, dy, length, angle, maxSpeed);
@@ -1550,7 +1635,7 @@ function movePlayerToward(player, target, speedScale = 1) {
     const accel = player.accelTimer > 0 ? SETTINGS.directionAccelMultiplier : 1;
     const sprint = player.sprintTimer > 0 ? (player.sprintMultiplier || SETTINGS.quickTapSprintMultiplier) : 1;
     const aimingScale = player === passer ? aimingShooterSpeedScale : 1;
-    const speed = SETTINGS.playerMoveSpeed * SETTINGS.gameSpeed * speedScale * aimingScale * accel * sprint * movementScale;
+    const speed = getActivePlayerBaseSpeed() * speedScale * aimingScale * accel * sprint * movementScale;
 
     player.x += (dx / length) * speed;
     player.y += (dy / length) * speed;
@@ -1613,7 +1698,7 @@ function moveNonPasserWithInertia(player, dx, dy, length, angle, maxSpeed) {
 }
 
 function getPlayerPlannedSpeed(player) {
-  const baseSpeed = SETTINGS.playerMoveSpeed * SETTINGS.gameSpeed;
+  const baseSpeed = getActivePlayerBaseSpeed();
   const movementScale = getMovementSpeedScale(player);
 
   if (player !== passer) {
@@ -1818,7 +1903,7 @@ function getAttackerPassTarget(attacker) {
 }
 
 function predictBallPosition(frames) {
-  const friction = getBallFriction();
+  const friction = SETTINGS.friction;
   const scaledFrames = frames * SETTINGS.gameSpeed;
   const travel = friction === 1 ? scaledFrames : (1 - Math.pow(friction, scaledFrames)) / (1 - friction);
 
@@ -1982,16 +2067,25 @@ function updateGoalie() {
 
 function updateGoalieDive(boxLeft, goalMin, goalMax) {
   const progress = clamp(1 - goalie.diveTimer / goalie.diveDuration, 0, 1);
-  const eased = 1 - Math.pow(1 - progress, 3);
-  const launchX = Math.sin(progress * Math.PI) * FIELD.height * 0.014;
+  const flightProgress = easeOutCubic(clamp((progress - 0.06) / 0.72, 0, 1));
+  const launch = Math.sin(progress * Math.PI);
+  const launchX = launch * FIELD.height * 0.026;
+  const liftY = goalie.diveDirection * Math.sin(progress * Math.PI) * FIELD.height * 0.01;
 
-  goalie.x = clamp(lerp(goalie.diveStartX, goalie.diveTargetX, eased) - launchX, boxLeft, goalie.baseX);
-  goalie.y = clamp(lerp(goalie.diveStartY, goalie.diveTargetY, eased), goalMin, goalMax);
+  goalie.diveProgress = progress;
+  goalie.diveStretch = clamp(Math.sin(progress * Math.PI) * 1.15, 0, 1);
+  goalie.diveLanding = smoothstep(0.72, 1, progress);
+  goalie.x = clamp(lerp(goalie.diveStartX, goalie.diveTargetX, flightProgress) - launchX, boxLeft, goalie.baseX);
+  goalie.y = clamp(lerp(goalie.diveStartY, goalie.diveTargetY, flightProgress) + liftY, goalMin, goalMax);
 
   goalie.diveTimer -= 1;
   if (goalie.diveTimer <= 0) {
     goalie.diveTimer = 0;
     goalie.diving = false;
+    goalie.diveProgress = 0;
+    goalie.diveStretch = 0;
+    goalie.diveLanding = 0;
+    goalie.saveAction = "";
   }
 }
 
@@ -2052,10 +2146,10 @@ function goalieShouldClaimBall() {
 }
 
 function getRaceSpeed(player) {
-  const baseSpeed = SETTINGS.playerMoveSpeed * SETTINGS.gameSpeed;
+  const baseSpeed = getActivePlayerBaseSpeed();
   const currentSpeed = Math.hypot(player.vx || 0, player.vy || 0);
 
-  return Math.max(baseSpeed, currentSpeed);
+  return Math.max(baseSpeed * getMovementSpeedScale(player), currentSpeed);
 }
 
 function getPassThreatPoint(receiver) {
@@ -2290,6 +2384,92 @@ function getDefenderShotBlockTarget(defender, receiver, defenderLane, origin = r
   };
 }
 
+function getEvaSlideTarget(defender) {
+  if (!defender.isEva || defender.slideTimer > 0 || defender.slideCooldown > 0) {
+    return null;
+  }
+
+  if (state === "ready" && ball.owner === "passer") {
+    return {
+      x: passer.x,
+      y: passer.y,
+      type: "player",
+      player: passer
+    };
+  }
+
+  if (state === "receive") {
+    const receiver = getActiveReceiver();
+
+    if (receiver && ball.owner === receiver.ownerKey) {
+      return {
+        x: receiver.x,
+        y: receiver.y,
+        type: "player",
+        player: receiver
+      };
+    }
+  }
+
+  if (["pass", "shot"].includes(state) && ball.owner === null) {
+    return {
+      x: ball.x,
+      y: ball.y,
+      type: "ball"
+    };
+  }
+
+  return null;
+}
+
+function maybeStartEvaSlide(defender) {
+  const target = getEvaSlideTarget(defender);
+
+  if (!target) {
+    return false;
+  }
+
+  const targetDistance = distance(defender, target);
+  const goalSideOrLevel = target.type === "ball" || defender.x >= target.x - FIELD.height * 0.045;
+  const laneClose = Math.abs(defender.y - target.y) <= FIELD.height * 0.18;
+
+  if (targetDistance > SETTINGS.evaSlideTriggerDistance || !goalSideOrLevel || !laneClose) {
+    return false;
+  }
+
+  defender.slideTimer = SETTINGS.evaSlideFrames;
+  defender.slideCooldown = SETTINGS.evaSlideCooldownFrames;
+  defender.slideAngle = Math.atan2(target.y - defender.y, target.x - defender.x);
+  defender.moveAngle = defender.slideAngle;
+  return true;
+}
+
+function updateEvaSlide(defender) {
+  defender.x += Math.cos(defender.slideAngle) * SETTINGS.evaSlideSpeed;
+  defender.y += Math.sin(defender.slideAngle) * SETTINGS.evaSlideSpeed;
+  defender.moveAngle = defender.slideAngle;
+  defender.slideTimer -= 1;
+}
+
+function updateEvaSlideTimers(defender) {
+  if (!defender.isEva) {
+    return false;
+  }
+
+  if (defender.slideCooldown > 0) {
+    defender.slideCooldown -= 1;
+  }
+
+  maybeStartEvaSlide(defender);
+
+  if (defender.slideTimer > 0) {
+    updateEvaSlide(defender);
+    return true;
+  }
+
+  return false;
+}
+
 function updateDefenders() {
   if (!["ready", "pass", "shot", "receive"].includes(state)) {
     return;
@@ -2312,6 +2492,12 @@ function updateDefenders() {
   }, 0);
 
   defenders.forEach((defender, index) => {
+    if (updateEvaSlideTimers(defender)) {
+      defender.x = clamp(defender.x, FIELD.padding + 50, FIELD.goalX - 42);
+      defender.y = clamp(defender.y, FIELD.padding + 36, FIELD.height - FIELD.padding - 36);
+      return;
+    }
+
     const defenderLane = index - (defenders.length - 1) / 2;
     const laneOffsetY = defender.markOffsetY ?? defenderLane * FIELD.height * 0.045;
     const markTarget = getOffBallAttackers()
@@ -2433,9 +2619,8 @@ function updateBall() {
   ball.prevY = ball.y;
   ball.x += ball.vx * SETTINGS.gameSpeed;
   ball.y += ball.vy * SETTINGS.gameSpeed;
-  const friction = getBallFriction();
-  ball.vx *= friction;
-  ball.vy *= friction;
+  ball.vx *= SETTINGS.friction;
+  ball.vy *= SETTINGS.friction;
   updateBallHeight();
 
   if (Math.hypot(ball.vx, ball.vy) < SETTINGS.minBallSpeed && ball.z === 0) {
@@ -2762,7 +2947,7 @@ function getReceiveDuration(carryTarget, receiver = getActiveReceiver()) {
     return SETTINGS.receiveShotDelayFrames;
   }
 
-  const speed = Math.max(SETTINGS.playerMoveSpeed * SETTINGS.gameSpeed, 0.1);
+  const speed = Math.max(getActivePlayerBaseSpeed(), 0.1);
   const carryFrames = Math.ceil(distance(receiver, carryTarget) / speed);
   const setShotFrames = Math.floor(SETTINGS.receiveShotDelayFrames * 0.48);
 
@@ -2871,15 +3056,25 @@ function startGoalieDive(target) {
     ? FIELD.goalHeight * (0.18 + lastPassQuality * 0.18)
     : FIELD.goalHeight * 0.14;
   const lateRead = randomBetween(-readWindow, readWindow) / anticipation;
+  const readTargetY = clamp(target.y + lateRead, FIELD.goalTop + SETTINGS.playerRadius, FIELD.goalTop + FIELD.goalHeight - SETTINGS.playerRadius);
+  const diveDirection = readTargetY >= goalie.y ? 1 : -1;
 
   goalie.diveStartX = goalie.x;
   goalie.diveStartY = goalie.y;
-  goalie.diveY = clamp(target.y + lateRead, FIELD.goalTop + SETTINGS.playerRadius, FIELD.goalTop + FIELD.goalHeight - SETTINGS.playerRadius);
+  goalie.diveY = clamp(
+    readTargetY - diveDirection * SETTINGS.goalieDiveHandOffset,
+    FIELD.goalTop + SETTINGS.playerRadius,
+    FIELD.goalTop + FIELD.goalHeight - SETTINGS.playerRadius
+  );
   goalie.diveTargetY = goalie.diveY;
-  goalie.diveTargetX = clamp(goalie.baseX - FIELD.height * 0.045, FIELD.goalX - MARKINGS.penaltyWidth, goalie.baseX);
-  goalie.diveDirection = goalie.diveY >= goalie.y ? 1 : -1;
-  goalie.diveDuration = receiverShot ? SETTINGS.goalieDiveFrames * 2 : SETTINGS.goalieDiveFrames;
+  goalie.diveTargetX = clamp(goalie.baseX - FIELD.height * (receiverShot ? 0.064 : 0.056), FIELD.goalX - MARKINGS.penaltyWidth, goalie.baseX);
+  goalie.diveDirection = diveDirection;
+  goalie.diveDuration = Math.round(receiverShot ? SETTINGS.goalieDiveFrames * 1.28 : SETTINGS.goalieDiveFrames);
   goalie.diveTimer = goalie.diveDuration;
+  goalie.diveProgress = 0;
+  goalie.diveStretch = 0;
+  goalie.diveLanding = 0;
+  goalie.saveAction = "";
   goalie.diving = true;
 }
 
@@ -2945,6 +3140,10 @@ function updateGoalEffects() {
     speedLineTimer -= 1;
   }
 
+  if (goalieSaveEffectTimer > 0) {
+    goalieSaveEffectTimer -= 1;
+  }
+
   goalParticles = goalParticles
     .map((particle) => ({
       ...particle,
@@ -2955,6 +3154,58 @@ function updateGoalEffects() {
       life: particle.life - 1
     }))
     .filter((particle) => particle.life > 0);
+}
+
+function clearEvaInjuryEffect() {
+  if (evaInjuryPlayer) {
+    evaInjuryPlayer.injuryRotation = 0;
+  }
+
+  evaInjuryPlayer = null;
+  evaInjuryTimer = 0;
+  evaInjuryVx = 0;
+  evaInjuryVy = 0;
+}
+
+function startEvaInjuryEffect(player, eva = getSlidingEva()) {
+  if (!player || !eva) {
+    return;
+  }
+
+  const fallbackAngle = eva.slideAngle || player.moveAngle || 0;
+  const hitAngle = distance(player, eva) > 0.1
+    ? Math.atan2(player.y - eva.y, player.x - eva.x)
+    : fallbackAngle;
+
+  evaInjuryPlayer = player;
+  evaInjuryTimer = SETTINGS.evaInjuryKnockbackFrames;
+  evaInjuryVx = Math.cos(hitAngle) * SETTINGS.evaInjuryKnockbackSpeed;
+  evaInjuryVy = Math.sin(hitAngle) * SETTINGS.evaInjuryKnockbackSpeed;
+  player.injuryRotation = Math.PI / 2;
+  player.moveAngle = hitAngle;
+  player.vx = evaInjuryVx;
+  player.vy = evaInjuryVy;
+
+  if (ball.owner === player.ownerKey) {
+    ball.owner = null;
+    ball.vx = -evaInjuryVx * 0.35;
+    ball.vy = -evaInjuryVy * 0.35;
+    ball.z = 0;
+    ball.vz = 0;
+  }
+}
+
+function updateEvaInjuryEffect() {
+  if (!evaInjuryPlayer || evaInjuryTimer <= 0) {
+    return;
+  }
+
+  evaInjuryPlayer.x = clamp(evaInjuryPlayer.x + evaInjuryVx, FIELD.padding + 38, FIELD.goalX - 38);
+  evaInjuryPlayer.y = clamp(evaInjuryPlayer.y + evaInjuryVy, FIELD.padding + 36, FIELD.height - FIELD.padding - 36);
+  evaInjuryPlayer.injuryRotation = (evaInjuryPlayer.injuryRotation || 0) + 0.18;
+  evaInjuryVx *= 0.9;
+  evaInjuryVy *= 0.9;
+  evaInjuryTimer -= 1;
 }
 
 function setOutcome(message) {
@@ -2970,7 +3221,7 @@ function setOutcome(message) {
     state = "offside";
   } else if (message.startsWith("Blocked")) {
     state = "blocked";
-  } else if (message === "Tackled!") {
+  } else if (message.startsWith("Tackled") || message === "hand gebrochen") {
     state = "tackled";
   } else {
     state = "miss";
@@ -2979,6 +3230,7 @@ function setOutcome(message) {
   recordAttempt(message);
   cancelDrag();
   roundTitle.textContent = message;
+  outcomeBannerDelayTimer = message === "hand gebrochen" ? SETTINGS.evaInjuryBannerDelayFrames : 0;
   if (state === "goal") {
     spawnGoalEffects();
   }
@@ -3039,6 +3291,38 @@ function endAttackForBallOut(message) {
   setOutcome(message);
 }
 
+function getSlidingEva() {
+  return defenders.find((defender) => defender.isEva && defender.slideTimer > 0) || null;
+}
+
+function getEvaSlideCollision() {
+  const eva = getSlidingEva();
+
+  if (!eva) {
+    return null;
+  }
+
+  if (state === "ready" && ball.owner === "passer" && distance(eva, passer) <= SETTINGS.evaSlideReach) {
+    return { type: "tackle", player: passer };
+  }
+
+  const receiver = getActiveReceiver();
+
+  if (state === "receive" && receiver && ball.owner === receiver.ownerKey && distance(eva, receiver) <= SETTINGS.evaSlideReach) {
+    return { type: "tackle", player: receiver };
+  }
+
+  if (["pass", "shot"].includes(state) && ball.owner === null && distance(eva, ball) <= SETTINGS.evaSlideReach * 0.76) {
+    return { type: "block" };
+  }
+
+  return null;
+}
+
+function getTackleMessage(defender) {
+  return defender?.isEva ? "Tackled by EVA!" : "Tackled!";
+}
+
 function checkCollisions() {
   const ballOutsidePitch = isBallFullyOutsidePitch();
 
@@ -3050,6 +3334,19 @@ function checkCollisions() {
   if (goalieCanClaimBallNow()) {
     catchBallByGoalie();
     setOutcome("Saved!");
+    return;
+  }
+
+  const evaSlideCollision = getEvaSlideCollision();
+  if (evaSlideCollision) {
+    if (evaSlideCollision.type === "block") {
+      ball.vx *= -0.18;
+      ball.vy *= 0.28;
+      setOutcome("Blocked by EVA!");
+    } else {
+      startEvaInjuryEffect(evaSlideCollision.player);
+      setOutcome("hand gebrochen");
+    }
     return;
   }
 
@@ -3141,30 +3438,33 @@ function checkCollisions() {
     return;
   }
 
-  if (state === "ready" && defenders.some((defender) =>
+  const passerTackler = state === "ready" ? defenders.find((defender) =>
     defenderCanTacklePasser(defender, SETTINGS.passerBlockDistance *
       getAbilityFactor(defender.name, "DEF", 0.006) *
       getAbilityFactor(defender.name, "PHY", 0.004))
-  )) {
-    setOutcome("Tackled!");
+  ) : null;
+  if (passerTackler) {
+    setOutcome(getTackleMessage(passerTackler));
     return;
   }
 
-  if (state === "ready" && isAnyAttackerOffside() && defenders.some((defender) => defenderCanTacklePasser(
+  const offsideTackler = state === "ready" && isAnyAttackerOffside() ? defenders.find((defender) => defenderCanTacklePasser(
     defender,
     SETTINGS.tackleDistance * getAbilityFactor(defender.name, "PHY", 0.006)
-  ))) {
-    setOutcome("Tackled!");
+  )) : null;
+  if (offsideTackler) {
+    setOutcome(getTackleMessage(offsideTackler));
     return;
   }
 
-  if (state === "receive" && defenders.some((defender) => defenderCanTackleScorer(
+  const receiverTackler = state === "receive" ? defenders.find((defender) => defenderCanTackleScorer(
     defender,
     SETTINGS.scorerTackleDistance *
       getAbilityFactor(defender.name, "DEF", 0.006) *
       getAbilityFactor(defender.name, "PHY", 0.004)
-  ))) {
-    setOutcome("Tackled!");
+  )) : null;
+  if (receiverTackler) {
+    setOutcome(getTackleMessage(receiverTackler));
     return;
   }
 
@@ -3176,8 +3476,9 @@ function checkCollisions() {
     return;
   }
 
-  if (state === "shot" && goalieCanReachShot()) {
-    catchBallByGoalie();
+  const goalieShotSave = state === "shot" ? getGoalieShotSave() : null;
+  if (goalieShotSave) {
+    saveShotByGoalie(goalieShotSave);
     setOutcome("Saved!");
     return;
   }
@@ -3203,6 +3504,120 @@ function catchBallByGoalie() {
   ball.z = 0;
   ball.vz = 0;
   ball.owner = null;
+}
+
+function getGoalieSavePoints() {
+  const progress = goalie.diving && goalie.diveDuration > 0
+    ? clamp(1 - goalie.diveTimer / goalie.diveDuration, 0, 1)
+    : 0;
+  const diveDirection = goalie.diveDirection || 1;
+
+  if (goalie.diving) {
+    const stretch = clamp(goalie.diveStretch || Math.sin(progress * Math.PI), 0, 1);
+    const handY = goalie.y + diveDirection * (SETTINGS.goalieDiveHandOffset + stretch * FIELD.height * 0.012);
+    const spread = FIELD.height * (0.014 + stretch * 0.012);
+
+    return [
+      { type: "glove", x: goalie.x - spread, y: handY, reach: SETTINGS.goalieDiveGloveReach },
+      { type: "glove", x: goalie.x + spread, y: handY, reach: SETTINGS.goalieDiveGloveReach },
+      { type: "body", x: goalie.x, y: goalie.y, reach: SETTINGS.goalieBodySaveReach }
+    ];
+  }
+
+  return [
+    { type: "glove", x: goalie.x, y: goalie.y - FIELD.height * 0.018, reach: SETTINGS.goalieCatchDistance * 0.62 },
+    { type: "glove", x: goalie.x, y: goalie.y + FIELD.height * 0.018, reach: SETTINGS.goalieCatchDistance * 0.62 },
+    { type: "body", x: goalie.x, y: goalie.y, reach: SETTINGS.goalieBodySaveReach }
+  ];
+}
+
+function getGoalieShotSave() {
+  if (shotSaveAttempted || state !== "shot") {
+    return null;
+  }
+
+  const previousBall = {
+    x: ball.prevX ?? ball.x,
+    y: ball.prevY ?? ball.y
+  };
+  const frameDistance = distance(previousBall, ball);
+
+  if (frameDistance < SETTINGS.ballRadius * 0.35) {
+    return null;
+  }
+
+  const savePoints = getGoalieSavePoints();
+  const ballSpeed = Math.hypot(ball.vx, ball.vy);
+  let bestSave = null;
+
+  savePoints.forEach((savePoint) => {
+    const closest = closestPointOnSegment(savePoint, previousBall, ball);
+    const rawAmount = getRawSegmentProjectionAmount(savePoint, previousBall, ball);
+    const pathDistance = distance(savePoint, closest);
+    const canContactPath = rawAmount >= -0.04 && rawAmount <= 1.12 && pathDistance <= savePoint.reach + SETTINGS.ballRadius * 0.55;
+    const canContactCurrentBall = distance(savePoint, ball) <= savePoint.reach + SETTINGS.ballRadius * 0.8;
+
+    if (!canContactPath && !canContactCurrentBall) {
+      return;
+    }
+
+    const contactPoint = canContactPath ? closest : { x: ball.x, y: ball.y, amount: 1 };
+    const score = pathDistance - (savePoint.type === "glove" ? 4 : 0);
+
+    if (!bestSave || score < bestSave.score) {
+      bestSave = {
+        contactPoint,
+        savePoint,
+        score,
+        action: ballSpeed >= SETTINGS.goalieParrySpeed || (ball.z || 0) > SETTINGS.ballRadius * 2 ? "parry" : "catch"
+      };
+    }
+  });
+
+  if (!bestSave) {
+    return null;
+  }
+
+  shotSaveAttempted = true;
+  return bestSave;
+}
+
+function saveShotByGoalie(save) {
+  const contact = save.contactPoint;
+  const parry = save.action === "parry";
+  const ballSpeed = Math.hypot(ball.vx, ball.vy) || 1;
+  const contactDirection = contact.y >= goalie.y ? 1 : -1;
+
+  ball.x = contact.x;
+  ball.y = contact.y;
+  ball.z = 0;
+  ball.vz = 0;
+  ball.owner = null;
+  goalie.diveDirection = contactDirection;
+  goalie.diveY = clamp(
+    contact.y - contactDirection * (SETTINGS.goalieDiveHandOffset + FIELD.height * 0.008),
+    FIELD.goalTop + SETTINGS.playerRadius,
+    FIELD.goalTop + FIELD.goalHeight - SETTINGS.playerRadius
+  );
+  goalie.diveTargetY = goalie.diveY;
+  goalie.diveTargetX = clamp(contact.x - FIELD.height * 0.035, FIELD.goalX - MARKINGS.penaltyWidth, goalie.baseX);
+  goalie.saveAction = save.action;
+  goalie.saveContactX = contact.x;
+  goalie.saveContactY = contact.y;
+  goalieSaveEffectTimer = SETTINGS.goalieSaveEffectFrames;
+  goalieSaveEffectX = contact.x;
+  goalieSaveEffectY = contact.y;
+  goalieSaveEffectAction = save.action;
+
+  if (parry) {
+    const parrySide = ball.y >= goalie.y ? 1 : -1;
+
+    ball.vx = -Math.abs(ball.vx / ballSpeed) * SETTINGS.shotSpeed * 0.58;
+    ball.vy = parrySide * SETTINGS.shotSpeed * 0.48;
+  } else {
+    ball.vx = 0;
+    ball.vy = 0;
+  }
 }
 
 function getBlockingDefender() {
@@ -3254,76 +3669,6 @@ function getCleanPassQuality(receiver = getActiveReceiver(), runScore = lastPass
   );
 }
 
-function goalieCanReachShot() {
-  if (shotSaveAttempted) {
-    return false;
-  }
-
-  const diveReach = SETTINGS.blockDistance *
-    getAbilityFactor(goalie.name, "DEF", 0.006) *
-    getAbilityFactor(goalie.name, "PHY", 0.004) *
-    (goalie.diving ? 2.35 : 1.12);
-  const previousBall = {
-    x: ball.prevX ?? ball.x,
-    y: ball.prevY ?? ball.y
-  };
-  const pathAmount = getSegmentProjectionAmount(goalie, previousBall, ball);
-  const pathDistance = distanceToSegment(goalie, previousBall, ball);
-  const catchDistance = SETTINGS.goalieCatchDistance *
-    getAbilityFactor(goalie.name, "DEF", 0.005) *
-    getAbilityFactor(goalie.name, "PHY", 0.004);
-  const inCatchZone = pathAmount > 0.02 && pathDistance <= catchDistance;
-
-  if (inCatchZone) {
-    shotSaveAttempted = true;
-    return true;
-  }
-
-  const crossedKeeperPlane = previousBall.x <= goalie.x + SETTINGS.ballRadius && ball.x >= goalie.x - SETTINGS.ballRadius;
-  const closeToKeeperX = Math.abs(ball.x - goalie.x) <= FIELD.height * 0.045;
-  const onDivePath = pathDistance <= diveReach;
-
-  if ((!crossedKeeperPlane && !closeToKeeperX) || !onDivePath) {
-    return false;
-  }
-
-  shotSaveAttempted = true;
-
-  const cleanReceiverShot = isOffBallAttacker(currentShooter) && lastPassQuality > 0.55;
-  const activeShooter = currentShooter ?? passer;
-  const shooterCloseness = getShooterGoalCloseness(activeShooter);
-  const shooterRoom = getShooterKeeperRoom(activeShooter);
-  const reachQuality = clamp(1 - pathDistance / diveReach, 0, 1);
-
-  if (shotDangerSnapshot) {
-    if (reachQuality > 0.96) {
-      return true;
-    }
-
-    const dangerSaveChance = clamp(reachQuality * 0.22 - shooterRoom * 0.16, 0.01, 0.08);
-    return Math.random() < dangerSaveChance;
-  }
-
-  if (cleanReceiverShot) {
-    const insideBox = isInsidePenaltyBox(currentShooter);
-    const cleanFinishPenalty = insideBox ? 0.2 : 0.12;
-    const saveChance = clamp(
-      reachQuality * 1.05 - lastPassQuality * 0.22 - cleanFinishPenalty - shooterCloseness * 0.1 - shooterRoom * 0.08,
-      0.08,
-      0.9
-    );
-
-    return reachQuality > 0.78 || Math.random() < saveChance;
-  }
-
-  if (reachQuality > 0.88) {
-    return true;
-  }
-
-  const saveChance = clamp(reachQuality * 1.1 - shooterCloseness * 0.16 - shooterRoom * 0.12, 0.28, 0.96);
-  return Math.random() < saveChance;
-}
-
 function update() {
   if (gameStarted && !runFinished) {
     updateRunTimer();
@@ -3351,10 +3696,15 @@ function update() {
   updateDefenders();
   updateBall();
   updateReceiveAnimation();
+  updateEvaInjuryEffect();
   checkCollisions();
 
   if (passPraiseTimer > 0) {
     passPraiseTimer -= 1;
+  }
+
+  if (outcomeBannerDelayTimer > 0) {
+    outcomeBannerDelayTimer -= 1;
   }
 
   if (outcomeTimer > 0) {
@@ -4342,6 +4692,10 @@ function getPlayerKit(player) {
     return KITS.keeper;
   }
 
+  if (player.isEva) {
+    return KITS.eva;
+  }
+
   return player.role === "Defender" ? KITS.germanyDark : KITS.germanyHome;
 }
 
@@ -4391,7 +4745,7 @@ function getRunAnimation(player) {
   const phaseSeed = (player.phase || player.number || 1) * 1.37;
   const aimingCarrier = dragging && state === "ready" && player === passer;
   const sprinting = (player.sprintTimer || 0) > 0;
-  const baseSpeed = SETTINGS.playerMoveSpeed * SETTINGS.gameSpeed || 1;
+  const baseSpeed = getActivePlayerBaseSpeed() || 1;
   const plannedSpeed = getPlayerPlannedSpeed(player);
   const actualSpeed = Math.hypot(player.vx || 0, player.vy || 0);
   const gaitSpeed = player === passer || actualSpeed < baseSpeed * 0.08 ? plannedSpeed : actualSpeed;
@@ -4631,6 +4985,38 @@ function drawStaminaBar(player) {
   ctx.restore();
 }
 
+function drawEvaSlideWake(player) {
+  if (!player.isEva || player.slideTimer <= 0) {
+    return;
+  }
+
+  const progress = 1 - player.slideTimer / SETTINGS.evaSlideFrames;
+
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  ctx.rotate(player.slideAngle || player.moveAngle || 0);
+  ctx.globalCompositeOperation = "screen";
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "rgba(255, 64, 84, 0.68)";
+  ctx.lineWidth = 4;
+  for (let i = 0; i < 5; i += 1) {
+    const side = i - 2;
+
+    ctx.globalAlpha = 0.42 - i * 0.035;
+    ctx.beginPath();
+    ctx.moveTo(-8, side * 5);
+    ctx.lineTo(-48 - progress * 22, side * 5 + Math.sin(roundFrame * 0.24 + i) * 2.4);
+    ctx.stroke();
+  }
+
+  ctx.globalAlpha = 0.28;
+  ctx.fillStyle = "rgba(255, 64, 84, 0.8)";
+  ctx.beginPath();
+  ctx.ellipse(-14, 0, 44, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawPlayer(player) {
   if (player.role === "Goalie" && player.diving) {
     drawDivingGoalie(player);
@@ -4643,6 +5029,8 @@ function drawPlayer(player) {
   const sockColor = kit.socks;
   const skin = "#f1c49b";
   const spriteScale = 0.64;
+  const slidingEva = player.isEva && player.slideTimer > 0;
+  const injuredByEva = player === evaInjuryPlayer && state === "tackled";
   const run = getRunAnimation(player);
   const torsoY = run.forwardLean;
   const hipY = 16.6 + torsoY * 0.12;
@@ -4740,12 +5128,13 @@ function drawPlayer(player) {
     }
   }
   ctx.restore();
+  drawEvaSlideWake(player);
   drawRunWake(player, run, isDefender);
   drawTurfContact(player, run, isDefender);
 
   ctx.save();
   ctx.translate(player.x, player.y - run.bodyBob * 0.35);
-  ctx.rotate(run.bodyRotation);
+  ctx.rotate(run.bodyRotation + (slidingEva ? Math.PI / 2 : 0) + (injuredByEva ? player.injuryRotation || Math.PI / 2 : 0));
   ctx.scale(spriteScale, spriteScale);
   ctx.transform(1, 0, run.torsoLean, 1, 0, 0);
 
@@ -4901,20 +5290,20 @@ function drawPlayer(player) {
   drawStaminaBar(player);
 
   ctx.font = "900 12px system-ui, sans-serif";
-  ctx.fillStyle = "rgba(4, 12, 8, 0.72)";
+  ctx.fillStyle = player.isEva ? "rgba(8, 3, 6, 0.88)" : "rgba(4, 12, 8, 0.72)";
   const labelWidth = Math.max(44, ctx.measureText(player.name).width + 12);
   const labelY = player.y + SETTINGS.playerRadius + 19;
   ctx.beginPath();
   roundedRect(player.x - labelWidth / 2, labelY, labelWidth, 22, 7);
   ctx.fill();
 
-  ctx.strokeStyle = player.role === "Goalie" ? "rgba(142, 231, 216, 0.7)" : player.role === "Defender" ? "rgba(244, 197, 66, 0.46)" : "rgba(255, 255, 255, 0.52)";
+  ctx.strokeStyle = player.isEva ? "rgba(255, 64, 84, 0.9)" : player.role === "Goalie" ? "rgba(142, 231, 216, 0.7)" : player.role === "Defender" ? "rgba(244, 197, 66, 0.46)" : "rgba(255, 255, 255, 0.52)";
   ctx.lineWidth = 1.2;
   ctx.beginPath();
   roundedRect(player.x - labelWidth / 2, labelY, labelWidth, 22, 7);
   ctx.stroke();
 
-  ctx.fillStyle = isTeamAttacker(player) ? "#ff4054" : "#ffffff";
+  ctx.fillStyle = player.isEva ? "#ff4054" : isTeamAttacker(player) ? "#ff4054" : "#ffffff";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(player.name, player.x, labelY + 11.5);
@@ -4922,28 +5311,32 @@ function drawPlayer(player) {
 
 function drawDivingGoalie(player) {
   const diveDirection = player.diveDirection || (player.diveY >= player.y ? 1 : -1);
-  const progress = clamp(1 - player.diveTimer / player.diveDuration, 0, 1);
+  const progress = clamp(player.diveProgress || (1 - player.diveTimer / player.diveDuration), 0, 1);
+  const stretch = clamp(player.diveStretch || Math.sin(progress * Math.PI), 0, 1);
+  const landing = clamp(player.diveLanding || smoothstep(0.72, 1, progress), 0, 1);
   const kit = getPlayerKit(player);
   const skin = "#f1c49b";
+  const bodyScaleX = 0.74 + stretch * 0.22 - landing * 0.06;
+  const bodyScaleY = 0.7 - stretch * 0.1 + landing * 0.08;
 
   ctx.save();
   ctx.translate(player.diveStartX, player.diveStartY);
-  ctx.globalAlpha = 0.2;
+  ctx.globalAlpha = 0.16 + stretch * 0.12;
   ctx.globalCompositeOperation = "screen";
   ctx.strokeStyle = kit.socks;
-  ctx.lineWidth = 9;
+  ctx.lineWidth = 8 + stretch * 2.5;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(0, 0);
   ctx.lineTo(player.x - player.diveStartX, player.y - player.diveStartY);
   ctx.stroke();
 
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.42)";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.34)";
   ctx.lineWidth = 3;
   for (let i = 0; i < 4; i += 1) {
     ctx.beginPath();
-    ctx.moveTo(-18 - i * 8, 12 + i * 3);
-    ctx.lineTo(player.x - player.diveStartX - 42 - i * 18, player.y - player.diveStartY + 18 + i * 5);
+    ctx.moveTo(-16 - i * 8, 10 + i * 3);
+    ctx.lineTo(player.x - player.diveStartX - 38 - i * 18, player.y - player.diveStartY + 15 + i * 5);
     ctx.stroke();
   }
   ctx.restore();
@@ -4952,25 +5345,50 @@ function drawDivingGoalie(player) {
   ctx.translate(player.x, player.y);
   ctx.fillStyle = "rgba(4, 12, 6, 0.36)";
   ctx.beginPath();
-  ctx.ellipse(-28, 28, 48 + progress * 12, 7, -0.28, 0, Math.PI * 2);
+  ctx.ellipse(-28, 28 + landing * 3, 48 + stretch * 22, 7 + landing * 2, -0.28, 0, Math.PI * 2);
   ctx.fill();
-  ctx.rotate(diveDirection * Math.PI / 2);
-  ctx.scale(0.72 + progress * 0.08, 0.72);
 
-  ctx.strokeStyle = kit.socks;
-  ctx.lineWidth = 6;
+  ctx.save();
+  ctx.globalCompositeOperation = "screen";
+  ctx.globalAlpha = 0.24 + stretch * 0.14;
+  ctx.strokeStyle = "rgba(142, 231, 216, 0.72)";
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = "round";
+  for (let i = 0; i < 4; i += 1) {
+    ctx.beginPath();
+    ctx.moveTo(-22 - i * 12, 22 + i * 3);
+    ctx.lineTo(-58 - i * 17 - stretch * 18, 28 + i * 5);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  ctx.rotate(diveDirection * Math.PI / 2);
+  ctx.scale(bodyScaleX, bodyScaleY);
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
+  ctx.lineWidth = 8;
   ctx.lineCap = "round";
   ctx.beginPath();
-  ctx.moveTo(12, -6);
-  ctx.lineTo(40, -12);
-  ctx.moveTo(12, 5);
-  ctx.lineTo(40, 11);
+  ctx.moveTo(7, -7);
+  ctx.lineTo(37 + stretch * 10, -14 - stretch * 4);
+  ctx.moveTo(7, 7);
+  ctx.lineTo(37 + stretch * 10, 14 + stretch * 4);
+  ctx.stroke();
+
+  ctx.strokeStyle = kit.socks;
+  ctx.lineWidth = 5.8;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(11, -6);
+  ctx.lineTo(42 + stretch * 12, -12 - stretch * 5);
+  ctx.moveTo(11, 5);
+  ctx.lineTo(42 + stretch * 12, 11 + stretch * 5);
   ctx.stroke();
 
   ctx.fillStyle = "#f8f8f8";
   ctx.beginPath();
-  ctx.ellipse(46, -13, 7, 4, -0.25, 0, Math.PI * 2);
-  ctx.ellipse(46, 12, 7, 4, 0.25, 0, Math.PI * 2);
+  ctx.ellipse(49 + stretch * 12, -13 - stretch * 5, 8.5, 4.8, -0.25, 0, Math.PI * 2);
+  ctx.ellipse(49 + stretch * 12, 12 + stretch * 5, 8.5, 4.8, 0.25, 0, Math.PI * 2);
   ctx.fill();
 
   const kitGradient = ctx.createLinearGradient(-18, -12, 18, 14);
@@ -4995,18 +5413,18 @@ function drawDivingGoalie(player) {
   ctx.lineWidth = 5;
   ctx.beginPath();
   ctx.moveTo(-12, 10);
-  ctx.lineTo(-30, 18);
+  ctx.lineTo(-32 - stretch * 5, 18 + landing * 3);
   ctx.moveTo(-8, -7);
-  ctx.lineTo(-27, -16);
+  ctx.lineTo(-30 - stretch * 4, -16 - landing * 2);
   ctx.stroke();
 
   ctx.strokeStyle = "#151515";
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(-30, 18);
-  ctx.lineTo(-38, 20);
-  ctx.moveTo(-27, -16);
-  ctx.lineTo(-36, -18);
+  ctx.moveTo(-32 - stretch * 5, 18 + landing * 3);
+  ctx.lineTo(-42 - stretch * 6, 20 + landing * 3);
+  ctx.moveTo(-30 - stretch * 4, -16 - landing * 2);
+  ctx.lineTo(-40 - stretch * 5, -18 - landing * 2);
   ctx.stroke();
 
   ctx.fillStyle = skin;
@@ -5136,6 +5554,47 @@ function drawBall() {
   ctx.fill();
 }
 
+function drawGoalieSaveEffect() {
+  if (goalieSaveEffectTimer <= 0) {
+    return;
+  }
+
+  const progress = 1 - goalieSaveEffectTimer / SETTINGS.goalieSaveEffectFrames;
+  const alpha = Math.pow(1 - progress, 0.85);
+  const isParry = goalieSaveEffectAction === "parry";
+  const radius = FIELD.height * (0.018 + progress * 0.075);
+
+  ctx.save();
+  ctx.translate(goalieSaveEffectX, goalieSaveEffectY);
+  ctx.globalCompositeOperation = "screen";
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = isParry ? "rgba(244, 197, 66, 0.95)" : "rgba(142, 231, 216, 0.95)";
+  ctx.lineWidth = isParry ? 4.2 : 3.2;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, radius, radius * 0.42, -0.12, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.lineCap = "round";
+  for (let i = 0; i < 10; i += 1) {
+    const angle = (i / 10) * Math.PI * 2;
+    const start = radius * 0.22;
+    const end = radius * (0.74 + (i % 2) * 0.18);
+
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(angle) * start, Math.sin(angle) * start * 0.5);
+    ctx.lineTo(Math.cos(angle) * end, Math.sin(angle) * end * 0.5);
+    ctx.stroke();
+  }
+
+  ctx.globalAlpha = alpha * 0.92;
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `900 ${11 * PITCH_SCALE}px system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(isParry ? "PUNCH" : "CATCH", 0, -FIELD.height * 0.035);
+  ctx.restore();
+}
+
 function getAimPreview(dx, dy) {
   const intent = getKickIntent(dx, dy);
   const directShot = intent === "shot";
@@ -5143,8 +5602,7 @@ function getAimPreview(dx, dy) {
     ? getAbilityFactor(passer.name, "SHO", 0.007)
     : getAbilityFactor(passer.name, "PAS", 0.005);
   const angle = Math.atan2(dy, dx);
-  const speed = Math.hypot(dx, dy) * SETTINGS.kickPower * kickFactor * (directShot ? 1 : SETTINGS.passPowerScale);
-  const friction = getBallFriction(intent, speed);
+  const speed = Math.hypot(dx, dy) * SETTINGS.kickPower * kickFactor;
   const points = [];
   let previewX = ball.x;
   let previewY = ball.y;
@@ -5154,8 +5612,8 @@ function getAimPreview(dx, dy) {
   for (let frame = 0; frame <= 96; frame += 1) {
     previewX += previewVx * SETTINGS.gameSpeed;
     previewY += previewVy * SETTINGS.gameSpeed;
-    previewVx *= friction;
-    previewVy *= friction;
+    previewVx *= SETTINGS.friction;
+    previewVy *= SETTINGS.friction;
 
     if (frame % 5 === 0) {
       points.push({ x: previewX, y: previewY });
@@ -5595,6 +6053,33 @@ function drawOutcomeBanner() {
     return;
   }
 
+  if (outcomeBannerDelayTimer > 0) {
+    const width = 230;
+    const height = 34;
+    const x = canvas.width / 2 - width / 2;
+    const y = 18;
+
+    ctx.save();
+    ctx.fillStyle = "rgba(4, 12, 8, 0.68)";
+    ctx.beginPath();
+    roundedRect(x, y, width, height, 9);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(255, 64, 84, 0.82)";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    roundedRect(x, y, width, height, 9);
+    ctx.stroke();
+
+    ctx.fillStyle = "#ff4054";
+    ctx.font = "900 18px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(roundTitle.textContent, canvas.width / 2, y + height / 2 + 0.5);
+    ctx.restore();
+    return;
+  }
+
   const isGoal = state === "goal";
   const bannerY = canvas.height / 2 - 78;
   const bannerGradient = ctx.createLinearGradient(0, bannerY, canvas.width, bannerY + 156);
@@ -5656,6 +6141,7 @@ function draw() {
   drawAimLine();
   drawReceiveAnimation();
   drawBall();
+  drawGoalieSaveEffect();
   drawGoalParticles();
   ctx.restore();
 
