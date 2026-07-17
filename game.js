@@ -3012,16 +3012,15 @@ function isBallFullyOutsidePitch() {
   return ball.x < left || ball.x > right || ball.y < top || ball.y > bottom;
 }
 
-function endRunForBallOut(message) {
+function endAttackForBallOut(message) {
   setOutcome(message);
-  finishRun("Ball out");
 }
 
 function checkCollisions() {
   const ballOutsidePitch = isBallFullyOutsidePitch();
 
   if (["pass", "shot"].includes(state) && ballOutsidePitch && !(state === "shot" && ball.x >= FIELD.goalX)) {
-    endRunForBallOut(state === "pass" ? "Missed pass!" : "Missed shot!");
+    endAttackForBallOut(state === "pass" ? "Missed pass!" : "Missed shot!");
     return;
   }
 
@@ -3163,7 +3162,7 @@ function checkCollisions() {
     if (shotMessage === "GOAL!") {
       setOutcome(shotMessage);
     } else {
-      endRunForBallOut(shotMessage);
+      endAttackForBallOut(shotMessage);
     }
     return;
   }
